@@ -1,0 +1,54 @@
+# ==============================
+# Assembly & Annotation Course
+# ==============================
+
+# SLURM logs
+*.o
+*.e
+slurm-*.out
+
+# FastQC output
+*.html
+*.zip
+
+# fastp output
+fastp.json
+fastp.html
+
+# Jellyfish / k-mer counting
+*.jf
+*.histo
+
+# Assemblies (large output files)
+*.fasta
+*.fa
+*.fna
+*.gfa
+
+# Trinity / RNA-Seq assemblies
+trinity_out_dir/
+*.Trinity.fasta
+*.Trinity.fasta.*
+
+# Temporary or large files
+*.tmp
+*.log
+*.bak
+
+# Compressed raw data (do not push reads)
+*.fastq
+*.fastq.gz
+*.fq
+*.fq.gz
+
+# IDE / system files
+.DS_Store
+.vscode/
+.idea/
+
+# Python / R
+__pycache__/
+*.Rhistory
+*.RData
+*.Rproj.user
+
