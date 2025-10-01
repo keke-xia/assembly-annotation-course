@@ -23,3 +23,7 @@ K=21
 
 # ---- threads ----
 THREADS="${THREADS:-8}"
+
+# ---- BUSCO offline download path & fixed lineage ----
+BUSCO_DL="$ROOT/busco_downloads"
+BUSCO_LINEAGE="brassicales_odb10"
