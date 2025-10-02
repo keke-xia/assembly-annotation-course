@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-#SBATCH --job-name=quast_all
+#SBATCH --job-name=quast_per_asm
 #SBATCH --partition=pibu_el8
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=32G
@@ -12,91 +12,95 @@
 
 set -euo pipefail
 
-# Load config
+# Read project configuration (paths, assemblies, labels, containers, reference)
 source scripts/05_01_config.sh
-mkdir -p "$EVAL_DIR/quast" "$ROOT/evaluations/logs"
 
-# Detect container runtime
+# Threads: prefer SLURM's cpus-per-task; fallback to THREADS from config
+THREADS="${SLURM_CPUS_PER_TASK:-$THREADS}"
+
+# Ensure output directories exist
+mkdir -p "$EVAL_DIR/quast" "$EVAL_DIR/logs"
+
+# Detect container runtime (Apptainer/Singularity); try loading module if missing
 CONTAINER=$(command -v apptainer || command -v singularity || true)
-if [[ -z "$CONTAINER" ]]; then
-  echo "[ERROR] Neither apptainer nor singularity found."
-  exit 2
+if [[ -z "${CONTAINER}" ]]; then
+  module load Apptainer 2>/dev/null || true
+  CONTAINER=$(command -v apptainer || command -v singularity || true)
 fi
+[[ -n "$CONTAINER" ]] || { echo "[ERROR] Neither apptainer nor singularity found."; exit 2; }
 
-# ---- Auto-detect reference FASTA if the configured one is missing ----
+# Bind both the project root and course reference directory (critical for reference access)
+BIND_DIRS="${ROOT},/data/courses"
+
+# Reference genome and annotation from config
 REF_FA="${REF_FASTA:-}"
-if [[ ! -s "$REF_FA" ]]; then
-  echo "[WARN] REF_FASTA '$REF_FA' not found. Auto-searching in $REF_DIR ..."
-  # common Arabidopsis naming patterns
-  mapfile -t CAND_FA < <(find "$REF_DIR" -maxdepth 2 -type f \
-    \( -iname "*TAIR*dna*.fa*" -o -iname "*TAIR*.fa*" -o -iname "*.fna" -o -iname "*.fasta" \) \
-    | sort)
-  if [[ ${#CAND_FA[@]} -gt 0 ]]; then
-    REF_FA="${CAND_FA[0]}"
-    echo "[INFO] Using detected reference FASTA: $REF_FA"
-  else
-    echo "[ERROR] No reference FASTA found under $REF_DIR. Will run the 'without reference' mode only."
-    REF_FA=""
-  fi
-fi
-
-# ---- Auto-detect annotation (features) if the configured one is missing ----
-# We try gff3/gff/gtf, with/without .gz
 ANN_FILE="${REF_GFF3:-}"
-if [[ ! -s "$ANN_FILE" ]]; then
-  echo "[WARN] Annotation file '$ANN_FILE' not found. Auto-searching in $REF_DIR ..."
-  mapfile -t CAND_ANN < <(find "$REF_DIR" -maxdepth 2 -type f \
-    \( -iname "*.gff3.gz" -o -iname "*.gff3" -o -iname "*.gff.gz" -o -iname "*.gff" -o -iname "*.gtf.gz" -o -iname "*.gtf" \) \
-    | sort)
-  if [[ ${#CAND_ANN[@]} -gt 0 ]]; then
-    ANN_FILE="${CAND_ANN[0]}"
-    echo "[INFO] Using detected annotation: $ANN_FILE"
-  else
-    echo "[WARN] No GFF/GTF annotation found under $REF_DIR. Proceeding WITHOUT --features."
-    ANN_FILE=""
+
+# Derive a human-friendly label for an assembly using ASM_LABEL mapping; fallback to basename
+get_label() {
+  local fa="$1"
+  local lbl="${ASM_LABEL[$fa]:-}"
+  if [[ -z "$lbl" ]]; then
+    lbl="$(basename "$fa")"
+    lbl="${lbl%%.*}"
   fi
-fi
+  echo "$lbl"
+}
 
-# Find genome assemblies
-mapfile -t GENOME_FASTA < <(find "$ASM_DIR" -maxdepth 2 -type f \
-  \( -iname "*flye*.fa*" -o -iname "*hifiasm*.fa*" -o -iname "*lja*.fa*" \
-     -o -iname "assembly*.fa*" -o -iname "*.fasta" \) | sort)
+# One-shot QUAST runner
+run_quast() {
+  local label="$1"; shift
+  local outdir="$1"; shift
+  local ref="$1"; shift
+  local ann="$1"; shift
+  local fasta="$1"; shift
 
-labels=$(printf "%s\n" "${GENOME_FASTA[@]##*/}" | sed 's/\.[^.]*$//' | paste -sd "," -)
+  mkdir -p "$outdir"
+  echo "[RUN] ${label} ($(basename "$fasta")) -> $outdir"
 
-# -------- QUAST without reference --------
-OUT1="$EVAL_DIR/quast/no_ref"
-mkdir -p "$OUT1"
-echo "[RUN] QUAST without reference"
-"$CONTAINER" exec --bind "$ROOT" "$SIF_QUAST" \
-  quast.py --eukaryote --threads "$THREADS" \
-  --labels "$labels" \
-  -o "$OUT1" "${GENOME_FASTA[@]}"
-
-# -------- QUAST with reference (only if REF available) --------
-if [[ -n "$REF_FA" ]]; then
-  OUT2="$EVAL_DIR/quast/with_ref"
-  mkdir -p "$OUT2"
-  echo "[RUN] QUAST with reference"
-  if [[ -n "$ANN_FILE" ]]; then
-    # with features
-    "$CONTAINER" exec --bind "$ROOT" "$SIF_QUAST" \
-      quast.py --eukaryote --threads "$THREADS" \
-      --est-ref-size 135000000 \
-      -R "$REF_FA" --features "$ANN_FILE" \
-      --labels "$labels" \
-      -o "$OUT2" "${GENOME_FASTA[@]}"
+  if [[ -n "$ref" ]]; then
+    # Reference-based QUAST
+    if [[ -n "$ann" ]]; then
+      "$CONTAINER" exec --bind "$BIND_DIRS" "$SIF_QUAST" \
+        quast.py --eukaryote --large --threads "$THREADS" \
+          -R "$ref" --features "$ann" \
+          --est-ref-size 135000000 \
+          --labels "$label" \
+          -o "$outdir" "$fasta"
+    else
+      "$CONTAINER" exec --bind "$BIND_DIRS" "$SIF_QUAST" \
+        quast.py --eukaryote --large --threads "$THREADS" \
+          -R "$ref" \
+          --est-ref-size 135000000 \
+          --labels "$label" \
+          -o "$outdir" "$fasta"
+    fi
   else
-    # without features (annotation missing)
-    "$CONTAINER" exec --bind "$ROOT" "$SIF_QUAST" \
-      quast.py --eukaryote --threads "$THREADS" \
-      --est-ref-size 135000000 \
-      -R "$REF_FA" \
-      --labels "$labels" \
-      -o "$OUT2" "${GENOME_FASTA[@]}"
+    # Reference-free QUAST
+    "$CONTAINER" exec --bind "$BIND_DIRS" "$SIF_QUAST" \
+      quast.py --eukaryote --large --threads "$THREADS" \
+        --labels "$label" \
+        -o "$outdir" "$fasta"
   fi
-else
-  echo "[WARN] Skipped 'with reference' run because no reference FASTA was found."
-fi
+}
 
-echo "[DONE] QUAST finished."
+# Iterate over assemblies: run reference-free and reference-based (if reference exists)
+for fa in "${ASSEMBLIES[@]}"; do
+  if [[ ! -s "$fa" ]]; then
+    echo "[WARN] Assembly not found or empty: $fa (skip)"
+    continue
+  fi
+  label="$(get_label "$fa")"
+
+  # Without reference
+  run_quast "$label" "$EVAL_DIR/quast/${label}/no_ref" "" "" "$fa"
+
+  # With reference (only if reference fasta exists)
+  if [[ -s "$REF_FA" ]]; then
+    run_quast "$label" "$EVAL_DIR/quast/${label}/with_ref" "$REF_FA" "$ANN_FILE" "$fa"
+  else
+    echo "[WARN] No reference FASTA found. Skipping 'with reference' run for $label."
+  fi
+done
+
+echo "[DONE] All QUAST runs finished."
